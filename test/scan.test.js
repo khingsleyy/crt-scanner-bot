@@ -1,124 +1,104 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runScan, buildMessage } from '../src/scan.js';
-import { TIMEFRAMES } from '../src/config.js';
+import { runWatch, decide, buildAlert } from '../src/scan.js';
+import { TIMEFRAMES, SCHEDULE } from '../src/config.js';
 
+const MIN = 60000;
+const H4 = TIMEFRAMES['4H'].ms;
 const mk = (open, high, low, close) => ({ open, high, low, close });
-const NOW = Date.UTC(2026, 10, 12, 12, 7);
-
-function trendSeries(slope, n = 200) {
-  const out = [];
-  let prev = 100;
-  for (let i = 0; i < n; i++) {
-    const close = 100 + i * slope + 3 * Math.sin(i / 2);
-    out.push(mk(prev, Math.max(prev, close) + 1, Math.min(prev, close) - 1, close));
-    prev = close;
-  }
-  return out;
-}
-
-// Give candles timestamps so the newest one closed 5 minutes before NOW.
-function stamp(candles, ms) {
-  return candles.map((c, i) => ({ ...c, time: NOW - 5 * 60000 - ms - (candles.length - 1 - i) * ms }));
-}
-
 const flat = (n) => Array.from({ length: n }, () => mk(100, 105, 95, 101));
-const R = mk(95, 120, 94, 118);
-const weakSell = mk(119, 123, 100, 105);
-const wickySell = mk(106, 123, 103, 104);
+const R = mk(95, 120, 94, 118); // bullish range candle
+const goodSweep = mk(119, 123, 100, 105);
+const failedSweep = mk(119, 123, 100, 125); // closes above the range high: not a sweep
 
-function fakeClient({ h4, daily, weekly, forming = true }) {
-  return {
-    async candles(epic, resolution) {
-      const tf = Object.values(TIMEFRAMES).find((t) => t.resolution === resolution);
-      const src = resolution === 'HOUR_4' ? h4 : resolution === 'DAY' ? daily : weekly;
-      const out = stamp(src, tf.ms);
-      if (forming) {
-        // add a still-forming candle that would wrongly trigger if not filtered out
-        const last = out[out.length - 1];
-        out.push({ ...mk(100, 130, 90, 95), time: last.time + tf.ms });
-      }
-      return out;
+const F = Date.UTC(2026, 10, 12, 8, 0); // sweep candle opens 08:00
+const C = F + H4; // closes 12:00
+const pair = [{ name: 'TEST', epic: 'TEST' }];
+
+function series(sweep) {
+  const cs = [...flat(30), R, sweep];
+  return cs.map((c, i) => ({ ...c, time: F - (cs.length - 1 - i) * H4 }));
+}
+function quiet(resolution) {
+  // daily / weekly with no CRT, last candle closed long before the test window
+  const ms = resolution === 'DAY' ? TIMEFRAMES.D.ms : TIMEFRAMES.W.ms;
+  return flat(80).map((c, i) => ({ ...c, time: F - 10 * ms - (79 - i) * ms }));
+}
+
+function setup({ startAt, finalSweep = goodSweep, live = true }) {
+  let now = startAt;
+  const clock = { now: () => now, sleepUntil: async (ms) => { if (ms > now) now = ms; } };
+  const client = {
+    async candles(epic, resolution, max) {
+      if (resolution === 'MINUTE') return [{ time: live ? now - MIN : now - 60 * MIN, open: 1, high: 1, low: 1, close: 1 }];
+      let out;
+      if (resolution === 'HOUR_4') out = series(now < C ? goodSweep : finalSweep);
+      else out = quiet(resolution);
+      return out.slice(-max);
     },
   };
+  const sent = [];
+  const send = async (t) => { sent.push(t); };
+  return { clock, client, sent, send, now: () => now };
 }
 
-const run = async (opts, state = {}) => {
-  const sent = [];
-  const result = await runScan({
-    client: fakeClient(opts),
-    send: async (t) => sent.push(t),
-    state,
-    now: NOW,
-    pairs: [{ name: 'XAUUSD', epic: 'GOLD' }],
-    log: () => {},
-  });
-  return { sent, result, state };
+const run = async (o, state = {}) => {
+  const s = setup(o);
+  const r = await runWatch({ client: s.client, send: s.send, state, clock: s.clock, pairs: pair, log: () => {} });
+  return { ...s, r, state };
 };
 
-const h4Sell = [...flat(60), R, weakSell];
+test('early alert ~10 min before close, then confirmed after close', async () => {
+  const { sent, state } = await run({ startAt: C - 25 * MIN });
+  assert.equal(sent.length, 2);
+  assert.match(sent[0], /SELL CRT \(forming\) \| TEST \| 4H/);
+  assert.match(sent[0], /Closes in ~10 min/);
+  assert.match(sent[1], /✅ CONFIRMED/);
+  assert.equal(Object.values(state)[0].outcome, 'confirmed');
+});
 
-test('sell CRT with a bearish daily trend: sent as "with trend", only once', async () => {
-  const opts = { h4: h4Sell, daily: trendSeries(-0.5), weekly: trendSeries(-0.5) };
+test('sweep that fails at close -> didn\'t hold', async () => {
+  const { sent } = await run({ startAt: C - 25 * MIN, finalSweep: failedSweep });
+  assert.equal(sent.length, 2);
+  assert.match(sent[1], /DIDN'T HOLD/);
+});
+
+test('no duplicate early alert if an earlier run already sent it; follow-up still goes out', async () => {
+  const key = `TEST|4H|${F}`;
+  const state = { [key]: { t: C - 9 * MIN, pre: { at: C - 9 * MIN, dir: 'sell' } } };
+  const { sent } = await run({ startAt: C - 5 * MIN }, state);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /CONFIRMED/);
+});
+
+test('backup alert only when closed < 30 min ago and no early alert', async () => {
+  const { sent } = await run({ startAt: C + 10 * MIN });
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /just closed/);
+});
+
+test('stale setups (closed > 30 min ago) never alert', async () => {
+  const { sent } = await run({ startAt: C + 45 * MIN });
+  assert.equal(sent.length, 0);
+});
+
+test('no early alert while the market is closed', async () => {
+  const { sent } = await run({ startAt: C - 25 * MIN, live: false });
+  assert.equal(sent.filter((t) => /forming/.test(t)).length, 0);
+});
+
+test('same candle is not alerted twice across runs', async () => {
   const state = {};
-  const a = await run(opts, state);
-  const h4 = a.result.alerts.filter((x) => x.tf === '4H');
-  assert.equal(h4.length, 1);
-  assert.equal(
-    h4[0].text,
-    '🔴 SELL CRT | XAUUSD | 4H\nTrend: with trend\nRange: 120.00 – 94.00'.replace('120.00', '120.000').replace('94.00', '94.000'),
-  );
-  const b = await run(opts, state);
-  assert.equal(b.result.alerts.filter((x) => x.tf === '4H').length, 0, 'duplicate alert');
+  await run({ startAt: C + 10 * MIN }, state);
+  const { sent } = await run({ startAt: C + 20 * MIN }, state);
+  assert.equal(sent.length, 0);
 });
 
-test('weak counter-trend sell in a bullish daily trend is not sent', async () => {
-  const a = await run({ h4: h4Sell, daily: trendSeries(0.5), weekly: trendSeries(0.5) });
-  assert.equal(a.result.alerts.filter((x) => x.tf === '4H').length, 0);
-});
-
-test('strong reversal in a bullish daily trend is sent, tagged counter-trend', async () => {
-  const a = await run({ h4: [...flat(60), R, wickySell], daily: trendSeries(0.5), weekly: trendSeries(0.5) });
-  const h4 = a.result.alerts.filter((x) => x.tf === '4H');
-  assert.equal(h4.length, 1);
-  assert.match(h4[0].text, /Trend: counter-trend \(reversal\)/);
-});
-
-test('mixed trend (not enough trend data) is sent, tagged mixed', async () => {
-  const a = await run({ h4: h4Sell, daily: trendSeries(0.5, 40), weekly: trendSeries(0.5, 40) });
-  const h4 = a.result.alerts.filter((x) => x.tf === '4H');
-  assert.equal(h4.length, 1);
-  assert.match(h4[0].text, /Trend: mixed/);
-});
-
-test('message shows "Range candle" line only for extended setups', () => {
-  const base = { direction: 'buy', high: 2650.4, low: 2631.1 };
-  assert.ok(!buildMessage('XAUUSD', '4H', { ...base, k: 1 }, 'mixed').includes('Range candle'));
-  assert.match(buildMessage('XAUUSD', '4H', { ...base, k: 6 }, 'mixed'), /Range candle: 6 candles ago/);
-  assert.match(buildMessage('XAUUSD', 'D', { ...base, k: 1 }, 'mixed'), /^🟢 BUY CRT \| XAUUSD \| Daily/);
-});
-
-test('a still-forming candle is never used as the sweep candle', async () => {
-  // data ends with R only; the forming candle added by the fake client would look like a sweep
-  const a = await run({ h4: [...flat(60), R], daily: trendSeries(-0.5), weekly: trendSeries(-0.5) });
-  assert.equal(a.result.alerts.filter((x) => x.tf === '4H').length, 0);
-});
-
-test('a failing pair is reported and the others still run', async () => {
-  const client = {
-    async candles(epic) {
-      if (epic === 'BAD') throw new Error('404 not found');
-      return stamp(flat(60), 4 * 3600e3);
-    },
-  };
-  const result = await runScan({
-    client,
-    send: async () => {},
-    state: {},
-    now: NOW,
-    pairs: [{ name: 'BAD', epic: 'BAD' }, { name: 'OK', epic: 'OK' }],
-    log: () => {},
-  });
-  assert.equal(result.okPairs, 1);
-  assert.equal(result.errors.length, 1);
+test('decide / buildAlert basics', () => {
+  const d = decide(series(goodSweep), []);
+  assert.equal(d.setup.direction, 'sell');
+  assert.equal(d.tag, 'mixed');
+  assert.equal(decide(series(mk(100, 104, 96, 101)), []), null);
+  assert.match(buildAlert({ name: 'X', tf: 'D', setup: d.setup, tag: 'mixed', kind: 'closed' }), /Daily/);
+  assert.ok(SCHEDULE.preCloseMin === 10);
 });

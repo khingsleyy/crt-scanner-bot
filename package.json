@@ -1,14 +1,15 @@
 {
   "name": "crt-scanner-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Telegram alerts for CRT (Candle Range Theory) setups on weekly, daily and 4H, using Capital.com data",
   "type": "module",
   "private": true,
   "engines": { "node": ">=22" },
   "scripts": {
-    "scan": "node --env-file-if-exists=.env src/cli.js scan",
-    "scan-dry": "node --env-file-if-exists=.env src/cli.js scan-dry",
+    "watch": "node --env-file-if-exists=.env src/cli.js watch",
+    "preview": "node --env-file-if-exists=.env src/cli.js preview",
     "check": "node --env-file-if-exists=.env src/cli.js check",
+    "candle-times": "node --env-file-if-exists=.env src/cli.js candle-times",
     "telegram-test": "node --env-file-if-exists=.env src/cli.js telegram-test",
     "test": "node --test test/*.test.js"
   }

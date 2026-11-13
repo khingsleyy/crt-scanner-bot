@@ -3,15 +3,24 @@
 const HOUR = 3600 * 1000;
 
 // Timeframes. `trendFrom` is the timeframe used to judge market direction for that CRT timeframe.
-// `maxAgeMs` stops the bot alerting on an old candle (e.g. on its very first run).
 export const TIMEFRAMES = {
-  '4H': { label: '4H', resolution: 'HOUR_4', ms: 4 * HOUR, trendFrom: 'D', maxAgeMs: 12 * HOUR },
-  D: { label: 'Daily', resolution: 'DAY', ms: 24 * HOUR, trendFrom: 'W', maxAgeMs: 36 * HOUR },
-  W: { label: 'Weekly', resolution: 'WEEK', ms: 168 * HOUR, trendFrom: 'W', maxAgeMs: 192 * HOUR },
+  '4H': { label: '4H', resolution: 'HOUR_4', ms: 4 * HOUR, trendFrom: 'D' },
+  D: { label: 'Daily', resolution: 'DAY', ms: 24 * HOUR, trendFrom: 'W' },
+  W: { label: 'Weekly', resolution: 'WEEK', ms: 168 * HOUR, trendFrom: 'W' },
 };
 
 // Which timeframes get scanned for CRT.
 export const SCAN_TIMEFRAMES = ['4H', 'D', 'W'];
+
+// When alerts are sent (all in minutes).
+export const SCHEDULE = {
+  preCloseMin: 10, // early alert this many minutes before the sweep candle closes
+  minLeadMin: 1, // no early alert if the candle closes in less than this
+  followUpDelayMin: 2, // "confirmed / didn't hold" message this long after the close
+  afterCloseCutoffMin: 30, // backup alert only if the candle closed less than this long ago
+  windowMin: 50, // each run looks this far ahead for candles about to close
+  liveMaxAgeMin: 10, // market counts as closed if its newest 1-minute candle is older than this
+};
 
 export const SETTINGS = {
   candlesToFetch: 250, // per pair, per timeframe (Capital.com max is 1000)
@@ -42,7 +51,7 @@ export const SETTINGS = {
 };
 
 // [display name, Capital.com epic]. Gold is "GOLD" on Capital.com.
-// Run the "check" task once to confirm every epic exists on your account, then delete any that fail.
+// Run the "check" task to confirm every epic exists on your account, then fix or delete any that fail.
 const pair = (name, epic = name) => ({ name, epic });
 
 export const PAIRS = [
@@ -51,6 +60,10 @@ export const PAIRS = [
   pair('BTCUSD'),
   pair('ETHUSD'),
   pair('USDCHF'),
+  // Indices (epics are my best guess: run "check" to confirm)
+  pair('JP225', 'J225'),
+  pair('US30'),
+  pair('NAS100', 'US100'),
   // JPY pairs
   pair('USDJPY'),
   pair('EURJPY'),

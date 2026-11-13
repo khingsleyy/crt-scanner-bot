@@ -1,12 +1,14 @@
-// Entry point. Usage: node src/cli.js <scan | scan-dry | check | telegram-test>
+// Entry point. Usage: node src/cli.js <watch | preview | check | candle-times | telegram-test>
 import { CapitalClient } from './capital.js';
 import { sendTelegram } from './telegram.js';
 import { loadState, saveState } from './state.js';
-import { runScan } from './scan.js';
-import { PAIRS, SETTINGS } from './config.js';
+import { runWatch, runPreview } from './scan.js';
+import { PAIRS, SETTINGS, TIMEFRAMES, SCAN_TIMEFRAMES } from './config.js';
 
 const STATE_PATH = 'state/sent.json';
-const task = process.argv[2] || 'scan';
+const ALIASES = { scan: 'watch', 'scan-dry': 'preview' };
+const raw = process.argv[2] || 'watch';
+const task = ALIASES[raw] || raw;
 
 function need(name) {
   const v = process.env[name];
@@ -23,6 +25,14 @@ function makeClient() {
     priceSide: SETTINGS.priceSide,
   });
 }
+
+const realClock = {
+  now: () => Date.now(),
+  sleepUntil: async (ms) => {
+    const d = ms - Date.now();
+    if (d > 0) await new Promise((r) => setTimeout(r, d));
+  },
+};
 
 async function main() {
   if (task === 'telegram-test') {
@@ -50,17 +60,47 @@ async function main() {
     return;
   }
 
-  const dry = task === 'scan-dry';
-  const state = loadState(STATE_PATH);
-  const send = dry
-    ? async (text) => console.log('\n--- would send ---\n' + text + '\n------------------')
-    : (text) => sendTelegram(need('TELEGRAM_BOT_TOKEN'), need('TELEGRAM_CHAT_ID'), text);
+  if (task === 'candle-times') {
+    const now = Date.now();
+    console.log(`Now (UTC): ${new Date(now).toISOString()}`);
+    for (const p of PAIRS.slice(0, 8)) {
+      for (const tf of SCAN_TIMEFRAMES) {
+        try {
+          const c = await client.candles(p.epic, TIMEFRAMES[tf].resolution, 3);
+          const last = c[c.length - 1];
+          const closeAt = last.time + TIMEFRAMES[tf].ms;
+          console.log(
+            `${p.name.padEnd(7)} ${tf.padEnd(3)} newest candle opens ${new Date(last.time).toISOString()} -> assumed close ${new Date(closeAt).toISOString()} (${closeAt > now ? 'still forming' : 'already closed'})`,
+          );
+        } catch (e) {
+          console.log(`${p.name} ${tf}: ${e.message}`);
+        }
+      }
+    }
+    return;
+  }
 
-  const result = await runScan({ client, send, state: dry ? { ...state } : state });
-  if (!dry) saveState(STATE_PATH, state);
+  if (task === 'preview') {
+    await runPreview({ client });
+    return;
+  }
 
-  console.log(`\nScanned ${result.okPairs}/${result.total} pairs, ${result.alerts.length} alert(s), ${result.errors.length} error(s).`);
-  if (result.okPairs === 0) process.exit(1); // nothing worked: make the run show as failed
+  if (task === 'watch') {
+    const state = loadState(STATE_PATH);
+    const result = await runWatch({
+      client,
+      clock: realClock,
+      state,
+      send: (text) => sendTelegram(need('TELEGRAM_BOT_TOKEN'), need('TELEGRAM_CHAT_ID'), text),
+      persist: () => saveState(STATE_PATH, state),
+    });
+    saveState(STATE_PATH, state);
+    console.log(`\nWatched ${result.watched} candle(s), sent ${result.sent.length} message(s), ${result.errors.length} error(s).`);
+    if (result.okPairs === 0) process.exit(1);
+    return;
+  }
+
+  throw new Error(`Unknown task: ${raw}`);
 }
 
 main().catch((e) => {

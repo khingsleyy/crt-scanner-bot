@@ -2,23 +2,22 @@ name: CRT Scanner
 
 on:
   schedule:
-    # Every 15 minutes. If your repo is PRIVATE, change this to hourly ("7 * * * *")
-    # or you will run out of free GitHub minutes. Public repos are unlimited.
-    - cron: '*/15 * * * *'
+    - cron: '12,42 * * * *'
   workflow_dispatch:
     inputs:
       task:
         description: 'What to run'
         type: choice
-        default: scan-dry
+        default: preview
         options:
           - telegram-test
           - check
-          - scan-dry
-          - scan
+          - candle-times
+          - preview
+          - watch
 
 permissions:
-  contents: write # lets the bot save which alerts it already sent
+  contents: write
 
 concurrency:
   group: crt-scanner
@@ -27,9 +26,9 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 70
     env:
-      TASK: ${{ github.event.inputs.task || 'scan' }}
+      TASK: ${{ github.event.inputs.task || 'watch' }}
       CAPITAL_API_KEY: ${{ secrets.CAPITAL_API_KEY }}
       CAPITAL_EMAIL: ${{ secrets.CAPITAL_EMAIL }}
       CAPITAL_API_PASSWORD: ${{ secrets.CAPITAL_API_PASSWORD }}
@@ -47,7 +46,7 @@ jobs:
         run: node src/cli.js "$TASK"
 
       - name: Save state
-        if: ${{ env.TASK == 'scan' }}
+        if: ${{ always() && env.TASK == 'watch' }}
         run: |
           git config user.name "crt-scanner"
           git config user.email "crt-scanner@users.noreply.github.com"
